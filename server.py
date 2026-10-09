@@ -58,7 +58,27 @@ def all_ips():
     except OSError:
         ips = set()
     ips.add(lan_ip())
-    return sorted(ip for ip in ips if not ip.startswith("127."))
+    ips = [ip for ip in ips if not ip.startswith(("127.", "169.254."))]
+    return sorted(ips, key=ip_priority)
+
+
+def ip_priority(ip):
+    """iPhone から届く可能性が高いアドレスほど前に並べる。
+
+    VPN や仮想ネットワーク（WSL / Hyper-V / VirtualBox）のアドレスは届かないので後ろに回す。
+    """
+    a, b = (int(x) for x in ip.split(".")[:2])
+    if ip.startswith("172.20.10."):         # iPhone のテザリング
+        return 0
+    if ip.startswith("192.168.56."):        # VirtualBox
+        return 4
+    if a == 192 and b == 168:               # 家庭用 Wi-Fi ルーター
+        return 1
+    if a == 10:
+        return 2
+    if a == 172 and 16 <= b <= 31:          # WSL / Hyper-V などで使われやすい
+        return 3
+    return 5                                # VPN など
 
 
 def safe_filename(name):
@@ -167,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {
             "code": code,
             "expires_in": CODE_TTL,
-            "url": f"http://{lan_ip()}:{PORT}/send?code={code}",
+            "urls": [f"http://{ip}:{PORT}/send?code={code}" for ip in all_ips()],
         })
 
     def stop(self):
@@ -327,6 +347,10 @@ RECEIVE_HTML = """<!doctype html>
     </div>
     <p class="muted">iPhone で QR コードを読み取るか、次の URL を開いてください：</p>
     <p class="url" id="url"></p>
+    <div id="alts" hidden>
+      <p class="muted">iPhone で開けない場合は、別のアドレスを試してください：</p>
+      <div id="altbtns" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+    </div>
   </div>
   <div id="connected" hidden>
     <p class="ok"><b>✅ iPhone と接続中</b> — 送信されたファイルが下に表示されます</p>
@@ -346,17 +370,28 @@ RECEIVE_HTML = """<!doctype html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-let shownFiles = 0, lastUrl = "";
+let shownFiles = 0;
 const fmt = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
 
 async function issue() {
   const r = await fetch("/api/new", {method:"POST"});
   const d = await r.json();
-  lastUrl = d.url;
-  $("url").textContent = d.url;
-  $("qr").innerHTML = "";
-  if (window.QRCode) new QRCode($("qr"), {text:d.url, width:160, height:160});
+  showUrl(d.urls[0] || "");
+  $("altbtns").innerHTML = "";
+  $("alts").hidden = d.urls.length < 2;
+  for (const u of d.urls) {
+    const btn = document.createElement("button");
+    btn.className = "secondary";
+    btn.textContent = new URL(u).hostname;
+    btn.onclick = () => showUrl(u);
+    $("altbtns").append(btn);
+  }
   refresh();
+}
+function showUrl(u) {
+  $("url").textContent = u;
+  $("qr").innerHTML = "";
+  if (u && window.QRCode) new QRCode($("qr"), {text:u, width:160, height:160});
 }
 $("new").onclick = issue;
 $("renew").onclick = issue;
