@@ -1,8 +1,9 @@
-"""iPhone -> Windows 画像転送サーバー（ワンタイムパスワード方式）
+"""iPhone -> Windows ファイル転送サーバー（ワンタイムパスワード方式）
 
 Windows 側で実行し、ブラウザで http://localhost:8000 を開いてパスワードを発行する。
-iPhone は同じ Wi-Fi から表示された URL を開き、パスワードを入力して画像を送る。
-受け取った画像は received/ フォルダに保存される。
+iPhone は同じネットワーク（Wi-Fi / iPhone のテザリング）から表示された URL を開き、
+パスワードを入力して写真・PDF などのファイルを送る。
+受け取ったファイルは received/ フォルダに保存される。
 
 Python 3.8 以上・標準ライブラリのみで動作。
 """
@@ -12,6 +13,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import socket
 import threading
 import time
@@ -24,7 +26,8 @@ SAVE_DIR = Path(os.environ.get("SAVE_DIR", Path(__file__).resolve().parent / "re
 CODE_TTL = 10 * 60          # パスワードの有効期限（秒）
 TOKEN_TTL = 30 * 60         # パスワード使用後、送信できる時間（秒）
 MAX_ATTEMPTS = 5            # 間違えられる回数。超えるとパスワードは無効
-MAX_FILE_SIZE = 200 * 1024 * 1024
+MAX_FILE_SIZE = 500 * 1024 * 1024
+INLINE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "application/pdf"}
 
 lock = threading.Lock()
 state = {
@@ -48,10 +51,19 @@ def lan_ip():
         s.close()
 
 
+def all_ips():
+    try:
+        ips = {i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        ips = set()
+    ips.add(lan_ip())
+    return sorted(ip for ip in ips if not ip.startswith("127."))
+
+
 def safe_filename(name):
     name = os.path.basename(name.replace("\\", "/")).strip()
     name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", name).strip(" .")
-    return (name or "image")[-120:]
+    return (name or "file")[-120:]
 
 
 def unique_path(name):
@@ -191,15 +203,18 @@ class Handler(BaseHTTPRequestHandler):
         if not f or not f["path"].exists():
             self.send_json(404, {"error": "not found"})
             return
-        ctype = mimetypes.guess_type(f["name"])[0] or "application/octet-stream"
-        data = f["path"].read_bytes()
+        # 画像と PDF だけブラウザで表示し、それ以外（HTML など）はダウンロード扱いにする
+        ctype = mimetypes.guess_type(f["name"])[0] or ""
+        inline = ctype in INLINE_TYPES
         self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition",
-                         "inline; filename*=UTF-8''" + urllib.parse.quote(f["name"]))
+        self.send_header("Content-Type", ctype if inline else "application/octet-stream")
+        self.send_header("Content-Length", str(f["path"].stat().st_size))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Disposition", ("inline" if inline else "attachment")
+                         + "; filename*=UTF-8''" + urllib.parse.quote(f["name"]))
         self.end_headers()
-        self.wfile.write(data)
+        with open(f["path"], "rb") as src:
+            shutil.copyfileobj(src, self.wfile)
 
     # ---- sender (iPhone) ----
     def claim(self):
@@ -238,7 +253,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(413, {"error": "ファイルサイズが不正です"})
             return
 
-        name = safe_filename(urllib.parse.unquote(self.headers.get("X-Filename", "image")))
+        name = safe_filename(urllib.parse.unquote(self.headers.get("X-Filename", "file")))
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
         with lock:
             path = unique_path(name)
@@ -281,7 +296,7 @@ button:disabled { opacity:.5; cursor:default; }
 
 RECEIVE_HTML = """<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>画像受信</title>
+<title>ファイル受信</title>
 <style>""" + COMMON_CSS + """
 .code { font-size:3.2rem; font-weight:700; letter-spacing:.3em; font-variant-numeric:tabular-nums; margin:8px 0; }
 .row { display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
@@ -290,10 +305,11 @@ RECEIVE_HTML = """<!doctype html>
 .url { word-break:break-all; font-family:ui-monospace,Consolas,monospace; font-size:.9rem; }
 .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:12px; }
 .item { border:1px solid var(--border); border-radius:10px; overflow:hidden; text-decoration:none; color:inherit; }
-.item img { width:100%; aspect-ratio:1; object-fit:cover; display:block; background:var(--border); }
+.item img, .item .icon { width:100%; aspect-ratio:1; object-fit:cover; display:block; background:var(--border); }
+.item .icon { display:flex; align-items:center; justify-content:center; font-size:3rem; }
 .item div { padding:6px 8px; font-size:.8rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 </style></head><body><main>
-<h1>📥 iPhone から画像を受け取る</h1>
+<h1>📥 iPhone からファイルを受け取る</h1>
 <div class="card">
   <div id="idle">
     <p>パスワードを発行して、iPhone で入力してください。</p>
@@ -312,7 +328,7 @@ RECEIVE_HTML = """<!doctype html>
     <p class="url" id="url"></p>
   </div>
   <div id="connected" hidden>
-    <p class="ok"><b>✅ iPhone と接続中</b> — 送信された画像が下に表示されます</p>
+    <p class="ok"><b>✅ iPhone と接続中</b> — 送信されたファイルが下に表示されます</p>
     <p class="muted" id="tremain"></p>
   </div>
   <div style="margin-top:12px; display:flex; gap:8px;">
@@ -321,7 +337,7 @@ RECEIVE_HTML = """<!doctype html>
   </div>
 </div>
 <div class="card">
-  <b>受信した画像</b> <span class="muted" id="count"></span>
+  <b>受信したファイル</b> <span class="muted" id="count"></span>
   <p class="muted">保存先: <span id="dir"></span></p>
   <div class="grid" id="files"></div>
 </div>
@@ -359,8 +375,15 @@ async function refresh() {
   for (const f of d.files.slice(shownFiles)) {
     const a = document.createElement("a");
     a.className = "item"; a.href = `/api/file/${f.id}`; a.target = "_blank";
-    const img = document.createElement("img");
-    img.src = `/api/file/${f.id}`; img.alt = ""; img.loading = "lazy";
+    let img;
+    if (/\\.(jpe?g|png|gif|webp|bmp)$/i.test(f.name)) {
+      img = document.createElement("img");
+      img.src = `/api/file/${f.id}`; img.alt = ""; img.loading = "lazy";
+    } else {
+      img = document.createElement("span");
+      img.className = "icon";
+      img.textContent = /\\.pdf$/i.test(f.name) ? "📄" : /\\.(heic|heif)$/i.test(f.name) ? "🖼️" : /\\.(mov|mp4|m4v)$/i.test(f.name) ? "🎬" : "📦";
+    }
     const cap = document.createElement("div");
     cap.textContent = f.name;
     a.append(img, cap);
@@ -375,7 +398,7 @@ setInterval(refresh, 1500);
 
 SEND_HTML = """<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>画像送信</title>
+<title>ファイル送信</title>
 <style>""" + COMMON_CSS + """
 input[type=text] { font:inherit; font-size:2rem; letter-spacing:.3em; text-align:center; width:100%; padding:12px;
   border:1px solid var(--border); border-radius:10px; background:var(--bg); color:var(--text); }
@@ -385,7 +408,7 @@ button { width:100%; margin-top:12px; font-size:1.05rem; }
 .list li { display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-bottom:1px solid var(--border); font-size:.9rem; }
 .list li span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 </style></head><body><main>
-<h1>📤 Windows へ画像を送る</h1>
+<h1>📤 Windows へファイルを送る</h1>
 <div class="card" id="step1">
   <p>Windows に表示されている 6 桁のパスワードを入力してください。</p>
   <input type="text" id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000">
@@ -394,7 +417,7 @@ button { width:100%; margin-top:12px; font-size:1.05rem; }
 </div>
 <div class="card" id="step2" hidden>
   <p class="ok"><b>✅ 接続しました</b></p>
-  <label class="pick">📷 タップして写真を選ぶ<input type="file" id="files" accept="image/*,video/*" multiple hidden></label>
+  <label class="pick">📎 タップして選ぶ<br><span class="muted">写真・PDF・その他のファイル</span><input type="file" id="files" multiple hidden></label>
   <ul class="list" id="list"></ul>
   <button id="send" disabled>送信</button>
   <p class="err" id="err2"></p>
@@ -483,9 +506,10 @@ def main():
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("=" * 50)
-    print(" 画像受信サーバーを起動しました")
+    print(" ファイル受信サーバーを起動しました")
     print(f" Windows で開く : http://localhost:{PORT}")
-    print(f" iPhone で開く  : http://{lan_ip()}:{PORT}/send")
+    for ip in all_ips():
+        print(f" iPhone で開く  : http://{ip}:{PORT}/send")
     print(f" 保存先         : {SAVE_DIR}")
     print(" 終了するには Ctrl+C")
     print("=" * 50)
