@@ -503,8 +503,25 @@ $("send").onclick = async () => {
 """
 
 
+def disable_quick_edit():
+    """Windows の黒い画面をクリックすると「選択」状態になり、表示待ちでサーバーが止まるのを防ぐ。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            ENABLE_QUICK_EDIT_MODE, ENABLE_EXTENDED_FLAGS = 0x0040, 0x0080
+            kernel32.SetConsoleMode(handle, (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS)
+    except Exception:
+        pass
+
+
 def main():
     global PORT
+    disable_quick_edit()
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     server = None
     for port in [PORT] + [p for p in PORT_RANGE if p != PORT]:
