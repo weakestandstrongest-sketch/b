@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = int(os.environ.get("PORT", "8000"))
+PORT_RANGE = range(8000, 8011)   # 8000 が使用中なら 8010 まで順に試す
 SAVE_DIR = Path(os.environ.get("SAVE_DIR", Path(__file__).resolve().parent / "received"))
 CODE_TTL = 10 * 60          # パスワードの有効期限（秒）
 TOKEN_TTL = 30 * 60         # パスワード使用後、送信できる時間（秒）
@@ -503,15 +504,28 @@ $("send").onclick = async () => {
 
 
 def main():
+    global PORT
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = None
+    for port in [PORT] + [p for p in PORT_RANGE if p != PORT]:
+        try:
+            server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+            PORT = port
+            break
+        except OSError:
+            print(f" ポート {port} は使用中のため、別のポートを試します")
+    if server is None:
+        raise SystemExit(" 使えるポートが見つかりませんでした")
     print("=" * 50)
     print(" ファイル受信サーバーを起動しました")
     print(f" Windows で開く : http://localhost:{PORT}")
-    for ip in all_ips():
+    ips = all_ips()
+    for ip in ips:
         print(f" iPhone で開く  : http://{ip}:{PORT}/send")
+    if not ips:
+        print(" ※ ネットワークに接続されていません。Wi-Fi かテザリングにつないでから起動し直してください")
     print(f" 保存先         : {SAVE_DIR}")
-    print(" 終了するには Ctrl+C")
+    print(" 終了するには、この画面を閉じるか Ctrl+C")
     print("=" * 50)
     try:
         import webbrowser
