@@ -1,6 +1,6 @@
 """iPhone -> Windows ファイル転送サーバー（ワンタイムパスワード方式）
 
-Windows 側で実行し、ブラウザで http://localhost:8000 を開いてパスワードを発行する。
+Windows 側で server.py をダブルクリックして起動し、ブラウザで http://localhost:8000 を開いてパスワードを発行する。
 iPhone は同じネットワーク（Wi-Fi / iPhone のテザリング）から表示された URL を開き、
 パスワードを入力して写真・PDF などのファイルを送る。
 受け取ったファイルは received/ フォルダに保存される。
@@ -539,4 +539,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # ダブルクリックで起動したとき、エラーで画面がすぐ閉じないようにする
+    try:
+        main()
+    except BaseException as e:
+        if not isinstance(e, KeyboardInterrupt):
+            import traceback
+            traceback.print_exc()
+            print()
+            print(" エラーで停止しました。上のメッセージを確認してください。")
+            try:
+                input(" Enter キーを押すと閉じます")
+            except (EOFError, KeyboardInterrupt):
+                pass
